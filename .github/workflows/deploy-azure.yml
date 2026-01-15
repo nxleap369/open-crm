@@ -1,0 +1,109 @@
+name: Deploy to Azure Container Apps
+
+# Required GitHub Secrets:
+# - AZURE_CREDENTIALS: Service principal JSON (for GitHub Actions authentication)
+# - APP_SECRET: Application secret key (generate with: openssl rand -base64 32)
+#
+# Note: This workflow uses Azure Managed Identities for passwordless authentication
+# to PostgreSQL, Redis, and Storage Account. No database passwords needed!
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AZURE_RESOURCE_GROUP: twentycrm-prod
+  AZURE_LOCATION: centralus
+  ACR_NAME: twentycrmacr
+  CONTAINER_APP_ENV: twentycrm-env
+  CONTAINER_APP_NAME: twentycrm-app
+  POSTGRES_SERVER: twentycrm-postgres
+  REDIS_SERVER: twentycrm-redis-1768504249
+  STORAGE_ACCOUNT: twentycrmstorage2026
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.5.0'
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Lint code
+        run: |
+          npx nx run-many -t lint --all --parallel=3
+
+      - name: Run tests
+        run: |
+          npx nx run-many -t test --all --parallel=3 --configuration=ci
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Build and push Docker image
+        run: |
+          # Login to ACR
+          az acr login --name ${{ env.ACR_NAME }}
+
+          # Build and push image
+          docker build -t ${{ env.ACR_NAME }}.azurecr.io/twenty:${{ github.sha }} \
+            -t ${{ env.ACR_NAME }}.azurecr.io/twenty:latest \
+            -f packages/twenty-docker/twenty/Dockerfile .
+
+          docker push ${{ env.ACR_NAME }}.azurecr.io/twenty:${{ github.sha }}
+          docker push ${{ env.ACR_NAME }}.azurecr.io/twenty:latest
+
+      - name: Deploy to Azure Container Apps
+        run: |
+          # Update container app with new image and managed identity
+          az containerapp update \
+            --name ${{ env.CONTAINER_APP_NAME }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --image ${{ env.ACR_NAME }}.azurecr.io/twenty:${{ github.sha }} \
+            --set-env-vars \
+              SERVER_URL=https://sandbox-crm.neuqa.io \
+              APP_SECRET=${{ secrets.APP_SECRET }} \
+              PG_DATABASE_HOST=${{ env.POSTGRES_SERVER }}.postgres.database.azure.com \
+              PG_DATABASE_NAME=twenty \
+              PG_DATABASE_PORT=5432 \
+              PG_DATABASE_USE_MANAGED_IDENTITY=true \
+              REDIS_HOST=${{ env.REDIS_SERVER }}.redis.cache.windows.net \
+              REDIS_PORT=6380 \
+              REDIS_USE_TLS=true \
+              REDIS_USE_MANAGED_IDENTITY=true \
+              STORAGE_TYPE=s3 \
+              STORAGE_S3_REGION=${{ env.AZURE_LOCATION }} \
+              STORAGE_S3_NAME=twentycrm-storage \
+              STORAGE_S3_ENDPOINT=https://${{ env.STORAGE_ACCOUNT }}.blob.core.windows.net \
+              STORAGE_USE_MANAGED_IDENTITY=true
+
+      - name: Verify deployment
+        run: |
+          echo "🔍 Checking deployment health..."
+          sleep 30
+
+          # Get container app FQDN
+          FQDN=$(az containerapp show \
+            --name ${{ env.CONTAINER_APP_NAME }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --query properties.configuration.ingress.fqdn -o tsv)
+
+          curl -f https://$FQDN/healthz && echo "✅ Deployment successful!"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "❌ Deployment failed! Check logs for details."

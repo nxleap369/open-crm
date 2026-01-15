@@ -1,0 +1,41 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.5.0'
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Lint changed files
+        run: |
+          npx nx affected -t lint --base=origin/main --configuration=ci
+
+      - name: Type check
+        run: |
+          npx nx affected -t typecheck --base=origin/main
+
+      - name: Run affected tests
+        run: |
+          npx nx affected -t test --base=origin/main --configuration=ci --codeCoverage
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          files: ./coverage/**/coverage-final.json
