@@ -62,7 +62,9 @@ jobs:
           az acr login --name ${{ env.ACR_NAME }}
 
           # Build and push image
-          docker build -t ${{ env.ACR_NAME }}.azurecr.io/twenty:${{ github.sha }} \
+          docker build \
+            --build-arg REACT_APP_SERVER_BASE_URL=https://twentycrm-app.calmbush-6aa2662b.centralus.azurecontainerapps.io \
+            -t ${{ env.ACR_NAME }}.azurecr.io/twenty:${{ github.sha }} \
             -t ${{ env.ACR_NAME }}.azurecr.io/twenty:latest \
             -f packages/twenty-docker/twenty/Dockerfile .
 
