@@ -1,11 +1,12 @@
 name: Deploy to Azure Container Apps
 
-# Required GitHub Secrets:
-# - AZURE_CREDENTIALS: Service principal JSON (for GitHub Actions authentication)
-# - APP_SECRET: Application secret key (generate with: openssl rand -base64 32)
+# Required GitHub Environment Secrets (in 'production' environment):
+# - AZURE_CREDENTIALS: Service principal JSON
+# - APP_SECRET: Application secret key
+# - PG_DATABASE_URL: PostgreSQL connection string
+# - REDIS_URL: Redis connection string
 #
-# Note: This workflow uses Azure Managed Identities for passwordless authentication
-# to PostgreSQL, Redis, and Storage Account. No database passwords needed!
+# See .github/DEPLOYMENT.md for detailed setup instructions
 
 on:
   push:
@@ -73,7 +74,7 @@ jobs:
 
       - name: Deploy to Azure Container Apps
         run: |
-          # Update container app with new image and managed identity
+          # Update container app with new image
           az containerapp update \
             --name ${{ env.CONTAINER_APP_NAME }} \
             --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
@@ -81,34 +82,60 @@ jobs:
             --set-env-vars \
               SERVER_URL=https://sandbox-crm.neuqa.io \
               APP_SECRET=${{ secrets.APP_SECRET }} \
-              PG_DATABASE_HOST=${{ env.POSTGRES_SERVER }}.postgres.database.azure.com \
-              PG_DATABASE_NAME=twenty \
-              PG_DATABASE_PORT=5432 \
-              PG_DATABASE_USE_MANAGED_IDENTITY=true \
-              REDIS_HOST=${{ env.REDIS_SERVER }}.redis.cache.windows.net \
-              REDIS_PORT=6380 \
-              REDIS_USE_TLS=true \
-              REDIS_USE_MANAGED_IDENTITY=true \
-              STORAGE_TYPE=s3 \
-              STORAGE_S3_REGION=${{ env.AZURE_LOCATION }} \
-              STORAGE_S3_NAME=twentycrm-storage \
-              STORAGE_S3_ENDPOINT=https://${{ env.STORAGE_ACCOUNT }}.blob.core.windows.net \
-              STORAGE_USE_MANAGED_IDENTITY=true
+              PG_DATABASE_URL=${{ secrets.PG_DATABASE_URL }} \
+              REDIS_URL=${{ secrets.REDIS_URL }} \
+              STORAGE_TYPE=local \
+              DISABLE_DB_MIGRATIONS=false
 
       - name: Verify deployment
         run: |
           echo "🔍 Checking deployment health..."
-          sleep 30
 
-          # Get container app FQDN
-          FQDN=$(az containerapp show \
+          # Wait for Container App to update
+          echo "Waiting 45 seconds for deployment to stabilize..."
+          sleep 45
+
+          # Get latest active revision
+          LATEST_REVISION=$(az containerapp revision list \
             --name ${{ env.CONTAINER_APP_NAME }} \
             --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
-            --query properties.configuration.ingress.fqdn -o tsv)
+            --query "sort_by([?properties.active==\`true\`], &properties.createdTime)[-1].name" \
+            -o tsv)
 
-          curl -f https://$FQDN/healthz && echo "✅ Deployment successful!"
+          echo "✅ Latest active revision: ${LATEST_REVISION}"
 
-      - name: Notify on failure
-        if: failure()
+          # Check custom domain health
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://sandbox-crm.neuqa.io/healthz || echo "000")
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Deployment successful! Health check passed."
+            echo "🌐 Application URL: https://sandbox-crm.neuqa.io"
+          else
+            echo "⚠️ Warning: Health check returned HTTP ${HTTP_CODE}"
+            echo "📋 Recent logs:"
+            az containerapp logs show \
+              --name ${{ env.CONTAINER_APP_NAME }} \
+              --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+              --tail 50 || true
+            exit 1
+          fi
+
+      - name: Create deployment summary
+        if: always()
         run: |
-          echo "❌ Deployment failed! Check logs for details."
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✅ **Deployment successful!**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Deployment failed!**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: Production (Azure Container Apps)" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL**: https://sandbox-crm.neuqa.io" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${{ env.ACR_NAME }}.azurecr.io/twenty:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: [\`${{ github.sha }}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by**: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Workflow run**: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
