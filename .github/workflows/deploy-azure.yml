@@ -63,7 +63,7 @@ jobs:
 
           # Build and push image
           docker build \
-            --build-arg REACT_APP_SERVER_BASE_URL=https://twentycrm-app.calmbush-6aa2662b.centralus.azurecontainerapps.io \
+            --build-arg REACT_APP_SERVER_BASE_URL=https://sandbox-crm.neuqa.io \
             -t ${{ env.ACR_NAME }}.azurecr.io/twenty:${{ github.sha }} \
             -t ${{ env.ACR_NAME }}.azurecr.io/twenty:latest \
             -f packages/twenty-docker/twenty/Dockerfile .
