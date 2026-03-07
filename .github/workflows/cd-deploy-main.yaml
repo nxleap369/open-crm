@@ -13,7 +13,14 @@ jobs:
     timeout-minutes: 3
     runs-on: ubuntu-latest
     steps:
+      - name: Skip dispatch outside upstream repository
+        if: github.repository_owner != 'twentyhq'
+        run: |
+          echo "Skipping cross-repository dispatch outside twentyhq."
+          echo "This is expected for forks and personal repositories."
+
       - name: Repository Dispatch
+        if: github.repository_owner == 'twentyhq'
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.TWENTY_INFRA_TOKEN }}
